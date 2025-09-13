@@ -499,13 +499,17 @@ run_bot_thread()
 if __name__ == "__main__":
     # Debug-run Flask (not recommended for production)
     print("Menjalankan Flask dev server (debug mode OFF). Untuk production gunakan Gunicorn.")
-    app.run(host="0.0.0.0", port=KEEP_ALIVE_PORT, debug=False, use_reloader=False)        + "!hexdump <hex|base64> — tampilkan hexdump\n"
-        + "!jwt <token> — decode JWT header/payload\n"
-        + "!url <decode|encode> <url>\n"
-        + "!ask <pertanyaan> — tanya AI (OPENAI_API_KEY dibutuhkan)\n"
-        + "!prompt-set <text> — owner-only: set system prompt untuk AI\n"
-        + "!history [limit] — lihat riwayat perintah mu\n"
-    )
+app.run(host="0.0.0.0", port=KEEP_ALIVE_PORT, debug=False, use_reloader=False)
+
+# Semua teks bantuan bot
+HELP_TEXT = (
+    "!hexdump <hex|base64> — tampilkan hexdump\n"
+    "!jwt <token> — decode JWT header/payload\n"
+    "!url <decode|encode> <url>\n"
+    "!ask <pertanyaan> — tanya AI (OPENAI_API_KEY dibutuhkan)\n"
+    "!prompt-set <text> — owner-only: set system prompt untuk AI\n"
+    "!history [limit] — lihat riwayat perintah mu\n"
+)
     await safe_send(ctx.channel, txt)
 
 @bot.command(name="decode")
