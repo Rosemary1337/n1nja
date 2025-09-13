@@ -27,15 +27,10 @@ import discord
 from discord.ext import commands
 import sqlite3
 
-DB_FILE = os.getenv("DB_FILE", "/tmp/n1nja.db")
-
-try:
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    cursor = conn.cursor()
-    print("✅ DB jalan di", DB_FILE)
-except Exception as e:
-    print("SQLite error:", e)
-    conn = None
+DB_FILE = ":memory:"  # <-- langsung in-memory, tidak bikin file
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+cursor = conn.cursor()
+print("✅ DB in-memory jalan")
     
 # ---------------- Load config ----------------
 load_dotenv()
