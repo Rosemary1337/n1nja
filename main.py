@@ -27,24 +27,15 @@ import discord
 from discord.ext import commands
 import sqlite3
 
-# Cek environment variable
-DB_FILE = os.getenv('DB_FILE', 'n1nja.db')
-
-# Jika path memiliki subfolder, buat foldernya agar ada
-db_dir = os.path.dirname(DB_FILE)
-if db_dir:
-    try:
-        os.makedirs(db_dir, exist_ok=True)
-    except Exception as e:
-        print("Gagal membuat folder untuk DB:", e)
+DB_FILE = os.getenv("DB_FILE", "/tmp/n1nja.db")
 
 try:
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-except sqlite3.OperationalError as e:
-    print("SQLite error:", str(e))
-    # coba fallback ke temp
-    DB_FILE = '/tmp/n1nja.db'
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    cursor = conn.cursor()
+    print("✅ DB jalan di", DB_FILE)
+except Exception as e:
+    print("SQLite error:", e)
+    conn = None
     
 # ---------------- Load config ----------------
 load_dotenv()
