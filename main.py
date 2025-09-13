@@ -1,5 +1,5 @@
 # main.py - n1nja (Ultimate CTF Swiss-Army Knife)
-# Bahasa Indonesia, lengkap, fallback DB, spaste.us paste
+# Lengkap, Bahasa Indonesia, safe SQLite fallback, spaste.us paste, Leapcell healthcheck
 # Tidak memakai f-strings.
 
 import os
@@ -13,11 +13,11 @@ import hashlib
 import codecs
 import sqlite3
 import asyncio
-import aiohttp
 import threading
 from typing import Optional, List, Tuple
-from collections import Counter, defaultdict
+from collections import defaultdict
 
+import aiohttp
 from dotenv import load_dotenv
 from flask import Flask
 from PIL import Image, ExifTags
@@ -31,11 +31,11 @@ BOT_NAME = os.getenv("BOT_NAME", "n1nja")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 USE_DCODE = os.getenv("USE_DCODE", "true").lower() == "true"
-PASTE_PROVIDER = os.getenv("PASTE_PROVIDER", "spaste")  # hanya 'spaste' saat ini
+PASTE_PROVIDER = os.getenv("PASTE_PROVIDER", "spaste")
 PASTE_EXPIRY = os.getenv("PASTE_EXPIRY", "1d")
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 KEEP_ALIVE_PORT = int(os.getenv("KEEP_ALIVE_PORT", "8080") or 8080)
-RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "1") or 1)  # per-user minimal delay
+RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "1") or 1)
 
 # ---------------- Bot setup ----------------
 intents = discord.Intents.default()
@@ -44,12 +44,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------------- DB (SQLite safe) ----------------
 def get_sqlite_connection():
-    # Coba pakai /tmp dulu, fallback ke memory
     db_file = "/tmp/n1nja.db"
     conn = None
     try:
         os.makedirs("/tmp", exist_ok=True)
-        # force create file
+        # create file if not exist
         with open(db_file, "a"):
             pass
         conn = sqlite3.connect(db_file, check_same_thread=False)
@@ -62,7 +61,6 @@ def get_sqlite_connection():
 
 conn = get_sqlite_connection()
 cur = conn.cursor()
-# buat tabel yang diperlukan
 try:
     cur.execute("""
     CREATE TABLE IF NOT EXISTS history(
@@ -98,24 +96,19 @@ HASH_GUESSES = {
     96: ['SHA-384', 'SHA3-384'],
     128: ['SHA-512', 'SHA3-512']
 }
-
-# in-memory provider cache (dcode etc.)
 _provider_cache = {}
-
-# per-user rate limit tracker
 _last_cmd_ts = defaultdict(lambda: 0.0)
 
 # ---------------- Utilities ----------------
 def save_history(guild_id, user_id, command, inp, out):
     try:
-        cur.execute("INSERT INTO history(guild_id,user_id,command,input,output) VALUES (?,?,?,?,?)",
+        cur.execute("INSERT INTO history(guild_id,user_id,command,input,output) VALUES(?,?,?,?,?)",
                     (str(guild_id), str(user_id), command, (inp or "")[:4000], (out or "")[:4000]))
         conn.commit()
     except Exception:
         pass
 
 async def paste_text_spaste(text: str, expiry: str = "1d") -> Optional[str]:
-    # spaste.us paste API
     url = "https://spaste.us/api/v1/paste"
     payload = {"content": text, "syntax": "text", "expiry": expiry}
     try:
@@ -133,7 +126,6 @@ async def paste_text_spaste(text: str, expiry: str = "1d") -> Optional[str]:
     return None
 
 async def paste_text(text: str) -> Optional[str]:
-    # wrapper (future: add other providers)
     if PASTE_PROVIDER == "spaste":
         return await paste_text_spaste(text, expiry=PASTE_EXPIRY)
     return None
@@ -323,25 +315,25 @@ def auto_decode_recursive(data: bytes, max_depth=3) -> List[Tuple[str, bytes]]:
             return
         seen.add(key)
         results.append((label, d))
-        # base64
+        # try base64
         try:
             b64 = base64.b64decode(d, validate=True)
             rec(b64, depth + 1, label + "->base64")
         except Exception:
             pass
-        # hex
+        # try hex
         try:
             hx = binascii.unhexlify(d)
             rec(hx, depth + 1, label + "->hex")
         except Exception:
             pass
-        # base32
+        # try base32
         try:
             b32 = base64.b32decode(d)
             rec(b32, depth + 1, label + "->base32")
         except Exception:
             pass
-        # base58
+        # try base58
         try:
             s = d.decode(errors="ignore")
             b58 = b58_decode(s)
@@ -396,7 +388,7 @@ def rate_limit_ok(user_id):
     _last_cmd_ts[user_id] = now
     return True
 
-# ---------------- Commands ----------------
+# ---------------- Commands (full implementations) ----------------
 @bot.event
 async def on_ready():
     await bot.change_presence(activity=discord.Game(name=BOT_NAME + " — CTF helper"))
@@ -625,7 +617,7 @@ async def cmd_strings(ctx):
         await ctx.send("Tidak ada string terbaca.")
         return
     teks = "\n".join(hasil[:200])
-    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "strings", attachment.filename if hasattr(attachment, "filename") else "attachment", teks[:4000])
+    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "strings", getattr(attachment, "filename", "attachment"), teks[:4000])
     await safe_send(ctx.channel, teks)
 
 @bot.command(name="stego")
@@ -634,8 +626,9 @@ async def cmd_stego(ctx):
         await ctx.send("Tunggu sebentar.")
         return
     try:
+        # cari attachment terakhir dari user pada channel
         target = None
-        async for m in ctx.channel.history(limit=40):
+        async for m in ctx.channel.history(limit=60):
             if m.author == ctx.author and m.attachments:
                 target = m
                 break
@@ -643,13 +636,15 @@ async def cmd_stego(ctx):
             await ctx.send("Unggah file lalu jalankan !stego di channel yang sama.")
             return
         att = target.attachments[0]
-        bio = io.BytesIO()
-        await att.save(bio)
-        data = bio.getvalue()
+        data = await att.read()
         reply = []
         try:
             img = Image.open(io.BytesIO(data))
-            exif = img._getexif()
+            exif = None
+            try:
+                exif = img._getexif()
+            except Exception:
+                exif = None
             if exif:
                 reply.append("EXIF terdeteksi:")
                 for k, v in exif.items():
@@ -658,23 +653,23 @@ async def cmd_stego(ctx):
             else:
                 reply.append("Tidak ada EXIF.")
             lsb = lsb_extract(img, bits=1, max_bytes=8192)
-            strings = extract_strings(lsb, min_len=4)
-            if strings:
+            strings_lsb = extract_strings(lsb, min_len=4)
+            if strings_lsb:
                 reply.append("\nLSB-extracted (beberapa):")
-                reply.extend(strings[:40])
+                reply.extend(strings_lsb[:40])
             else:
                 reply.append("\nTidak ada LSB output jelas.")
         except Exception:
-            strings = extract_strings(data, min_len=4)
-            if strings:
+            strings_file = extract_strings(data, min_len=4)
+            if strings_file:
                 reply.append("Strings (beberapa):")
-                reply.extend(strings[:200])
+                reply.extend(strings_file[:200])
             else:
                 reply.append("Tidak ada printable strings.")
         reply.append("\nHexdump (dipotong):")
         reply.append(hexdump(data, length=16))
         out = "\n".join(reply)
-        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "stego", att.filename if hasattr(att, "filename") else "attachment", out[:4000])
+        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "stego", getattr(att, "filename", "attachment"), out[:4000])
         await safe_send(ctx.channel, out)
     except Exception as e:
         await ctx.send("Stego error: " + str(e))
@@ -690,12 +685,12 @@ async def cmd_fileinfo(ctx):
     f = ctx.message.attachments[0]
     data = await f.read()
     out_lines = []
-    out_lines.append("Nama: " + (f.filename if hasattr(f, "filename") else "attachment"))
+    out_lines.append("Nama: " + (getattr(f, "filename", "attachment")))
     out_lines.append("Ukuran: %d bytes" % len(data))
     out_lines.append("MD5: " + hashlib.md5(data).hexdigest())
     out_lines.append("SHA1: " + hashlib.sha1(data).hexdigest())
     out_lines.append("SHA256: " + hashlib.sha256(data).hexdigest())
-    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "fileinfo", f.filename if hasattr(f, "filename") else "attachment", "\n".join(out_lines)[:4000])
+    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "fileinfo", getattr(f, "filename", "attachment"), "\n".join(out_lines)[:4000])
     await safe_send(ctx.channel, "\n".join(out_lines))
 
 @bot.command(name="hexdump")
@@ -771,7 +766,7 @@ async def cmd_history(ctx, limit: int = 10):
     except Exception as e:
         await ctx.send("History error: " + str(e))
 
-# AI (OpenAI) - optional
+# ---------------- AI (OpenAI) ----------------
 @bot.command(name="ask")
 async def cmd_ask(ctx, *, prompt: str):
     if not OPENAI_KEY:
@@ -794,7 +789,6 @@ async def cmd_ask(ctx, *, prompt: str):
             sp = row[0]
         else:
             sp = "Anda adalah n1nja, asisten CTF ringkas dan aman. Beri petunjuk decoding/analisis, bukan instruksi berbahaya."
-        # gunakan ChatCompletion synchronous call via thread to avoid blocking event loop
         def call_openai():
             return openai.ChatCompletion.create(model="gpt-4o-mini", messages=[{"role":"system","content":sp},{"role":"user","content":prompt}], max_tokens=800, temperature=0.25)
         resp = await asyncio.to_thread(call_openai)
@@ -813,15 +807,21 @@ async def cmd_prompt_set(ctx, *, prompt: str):
     conn.commit()
     await ctx.send("System prompt diperbarui.")
 
-# ---------------- Keep-alive Flask ----------------
+# ---------------- Keep-alive Flask (Leapcell healthcheck) ----------------
 app = Flask("")
 @app.route("/")
 def home():
     return BOT_NAME + " aktif"
 
+# required Leapcell health path
+@app.route("/kaithhealthcheck")
+def kaith_health():
+    return "OK", 200
+
 def run_flask():
     try:
-        app.run(host="0.0.0.0", port=KEEP_ALIVE_PORT)
+        port = int(os.getenv("KEEP_ALIVE_PORT", str(KEEP_ALIVE_PORT)))
+        app.run(host="0.0.0.0", port=port)
     except Exception:
         pass
 
@@ -830,12 +830,10 @@ def start_keepalive_thread():
     t.daemon = True
     t.start()
 
-# ---------------- Run ----------------
+# ---------------- Main run ----------------
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         print("DISCORD_TOKEN tidak ditemukan. Set environment variable DISCORD_TOKEN.")
         raise SystemExit(1)
-    # start keep-alive
     start_keepalive_thread()
-    # run bot
     bot.run(DISCORD_TOKEN)
