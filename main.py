@@ -25,12 +25,41 @@ from PIL import Image, ExifTags
 
 import discord
 from discord.ext import commands
+import os
 import sqlite3
 
-DB_FILE = ":memory:"  # <-- langsung in-memory, tidak bikin file
-conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-cursor = conn.cursor()
-print("✅ DB in-memory jalan")
+# Coba pakai DB di /tmp (hanya sementara, hilang tiap restart)
+DB_FILE = "/tmp/n1nja.db"
+conn = None
+
+try:
+    os.makedirs("/tmp", exist_ok=True)         # pastikan /tmp ada
+    open(DB_FILE, "a").close()                 # paksa bikin file kalau belum ada
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    print(f"✅ DB jalan di {DB_FILE}")
+except Exception as e:
+    print(f"⚠️ Gagal pakai file DB ({e}), fallback ke in-memory")
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    print("✅ DB jalan di memory (tidak persistent)")
+
+cur = conn.cursor()
+
+# Contoh bikin tabel
+cur.execute("""
+CREATE TABLE IF NOT EXISTS logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message TEXT
+)
+""")
+conn.commit()
+
+# Contoh insert
+cur.execute("INSERT INTO logs (message) VALUES (?)", ("Hello from Leapcell!",))
+conn.commit()
+
+# Contoh read
+for row in cur.execute("SELECT * FROM logs"):
+    print(row)
     
 # ---------------- Load config ----------------
 load_dotenv()
