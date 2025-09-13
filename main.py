@@ -25,7 +25,18 @@ from PIL import Image, ExifTags
 
 import discord
 from discord.ext import commands
+import sqlite3
 
+# Lokasi database
+DB_FILE = os.getenv("DB_FILE", "n1nja.db")
+
+# Buat folder kalau perlu
+db_dir = os.path.dirname(DB_FILE)
+if db_dir and not os.path.exists(db_dir):
+    os.makedirs(db_dir, exist_ok=True)
+
+conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+cursor = conn.cursor()
 # ---------------- Load config ----------------
 load_dotenv()
 BOT_NAME = 'n1nja'
