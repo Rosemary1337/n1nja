@@ -1,7 +1,8 @@
 # n1nja.py
 # Ultimate Swiss-Army-Knife CTF helper (Bahasa Indonesia)
-# - Banyak fitur: decoding/encoding, crypto, stego, fileinfo, hashid (dCode), AI, history, paste
-# - Gunakan .env (python-dotenv) untuk DISCORD_TOKEN, OPENAI_API_KEY, USE_DCODE, PASTE_ENDPOINT, OWNER_ID, PORT
+# - Integrasi spaste.us untuk paste otomatis
+# - Banyak fitur: decode/encode, crypto, stego, fileinfo, hashid (dCode), AI, history, paste
+# - Gunakan .env untuk DISCORD_TOKEN, OPENAI_API_KEY, USE_DCODE, OWNER_ID, PORT
 
 import os
 import re
@@ -31,7 +32,8 @@ BOT_NAME = 'n1nja'
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 OPENAI_KEY = os.getenv('OPENAI_API_KEY', '')
 USE_DCODE = os.getenv('USE_DCODE', 'true').lower() == 'true'
-PASTE_ENDPOINT = os.getenv('PASTE_ENDPOINT', 'https://hastebin.com/documents')
+PASTE_PROVIDER = os.getenv('PASTE_PROVIDER', 'spaste')  # 'spaste' default
+PASTE_EXPIRY = os.getenv('PASTE_EXPIRY', '1d')  # spaste expiry string
 OWNER_ID = int(os.getenv('OWNER_ID', '0') or 0)
 PORT = int(os.getenv('PORT', '8080') or 8080)
 
@@ -67,8 +69,8 @@ HASH_GUESSES = {
 COMMON_WORDS = [b'the', b'flag', b'ctf', b'and', b'http', b'admin']
 FLAG_PATTERNS = [r'CTF\{[^}]{3,}\}', r'flag\{[^}]{3,}\}', r'[A-Za-z0-9_{}-]{8,}']
 
-# in-memory cache for dCode
-_dcode_cache = {}
+# in-memory cache for providers (dCode etc)
+_provider_cache = {}
 
 # ---------------- Utilities ----------------
 def save_history(guild_id, user_id, command, inp, out):
@@ -78,34 +80,68 @@ def save_history(guild_id, user_id, command, inp, out):
     except Exception:
         pass
 
-async def paste_text(text: str) -> Optional[str]:
-    """Paste long text to paste service (Hastebin by default)."""
+async def paste_text_spaste(text: str, expiry: str = '1d') -> Optional[str]:
+    """
+    Upload ke spaste.us API.
+    Request:
+      POST https://spaste.us/api/v1/paste
+      JSON: { "content": "...", "syntax": "text", "expiry":"1d" }
+    Response:
+      { "status":"success", "paste_url": "https://spaste.us/p/abcd" }
+    """
+    url = 'https://spaste.us/api/v1/paste'
+    payload = {
+        'content': text,
+        'syntax': 'text',
+        'expiry': expiry
+    }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(PASTE_ENDPOINT, data=text.encode(), timeout=15) as resp:
-                if resp.status == 200:
-                    j = await resp.json()
-                    key = j.get('key') or j.get('id')
-                    if key:
-                        return 'https://hastebin.com/' + key
+            async with session.post(url, json=payload, timeout=20) as resp:
+                if resp.status != 200:
+                    return None
+                j = await resp.json()
+                if isinstance(j, dict) and j.get('status') == 'success' and j.get('paste_url'):
+                    return j.get('paste_url')
+                # fallback: if paste_url directly
+                if isinstance(j, dict) and j.get('paste_url'):
+                    return j.get('paste_url')
     except Exception:
         return None
     return None
 
+async def paste_text(text: str) -> Optional[str]:
+    """
+    Wrapper paste_text: saat ini mendukung spaste.us.
+    Mudah diubah untuk provider lain dengan mengganti fungsi di sini.
+    """
+    # hanya spaste untuk sekarang
+    return await paste_text_spaste(text, expiry=PASTE_EXPIRY)
+
 async def safe_send(channel, text: str):
-    """Send long text safely (paste if too long)."""
+    """
+    Kirim ke Discord: jika teks panjang, upload ke paste provider lalu kirim link.
+    """
     if text is None:
         return
     max_len = 1900
-    if len(text) <= max_len:
-        await channel.send('```' + text + '```')
-        return
-    url = await paste_text(text)
-    if url:
-        await channel.send('Output terlalu panjang, dipaste: ' + url)
-        return
-    for i in range(0, len(text), max_len):
-        await channel.send('```' + text[i:i+max_len] + '```')
+    try:
+        if len(text) <= max_len:
+            await channel.send('```' + text + '```')
+            return
+        url = await paste_text(text)
+        if url:
+            await channel.send('📄 Output terlalu panjang, disimpan di: ' + url)
+            return
+        # fallback: kirim potongan
+        for i in range(0, len(text), max_len):
+            await channel.send('```' + text[i:i+max_len] + '```')
+    except Exception:
+        # final fallback: kirim simple error
+        try:
+            await channel.send('⚠️ Gagal mengirim output. Cek bot logs.')
+        except Exception:
+            pass
 
 def find_flags(text: str) -> List[str]:
     found = []
@@ -117,7 +153,6 @@ def find_flags(text: str) -> List[str]:
 
 # ---------------- Binary helpers ----------------
 def extract_strings(data: bytes, min_len: int = 4) -> List[str]:
-    """Extract printable ASCII strings from binary data."""
     res = []
     current = bytearray()
     for b in data:
@@ -304,8 +339,8 @@ def auto_decode_recursive(data: bytes, max_depth=3) -> List[Tuple[str, bytes]]:
 async def lookup_hash_dcode(hashtext: str, use_cache=True, cache_ttl=3600) -> Optional[str]:
     if not USE_DCODE:
         return None
-    if use_cache and hashtext in _dcode_cache:
-        ts, val = _dcode_cache[hashtext]
+    if use_cache and hashtext in _provider_cache:
+        ts, val = _provider_cache[hashtext]
         if time.time() - ts < cache_ttl:
             return val
     url = 'https://www.dcode.fr/api/'
@@ -330,7 +365,7 @@ async def lookup_hash_dcode(hashtext: str, use_cache=True, cache_ttl=3600) -> Op
                     for i, r in enumerate(results[:12]):
                         lines.append('%d. %s' % (i+1, r))
                     out = '\n'.join(lines)
-                    _dcode_cache[hashtext] = (time.time(), out)
+                    _provider_cache[hashtext] = (time.time(), out)
                     return out
     except Exception:
         return None
