@@ -1,7 +1,3 @@
-# main.py - n1nja (CTF Swiss Army Knife) - Gunicorn-ready
-# Bahasa Indonesia, konsisten indentasi (4 spasi), tidak memakai f-strings.
-# Pastikan requirements terinstall dan .env terisi.
-
 import os
 import re
 import io
@@ -22,21 +18,27 @@ import aiohttp
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from PIL import Image, ExifTags
+from bs4 import BeautifulSoup
+from urllib.parse import urlencode
+import json
+import time
 
 import discord
 from discord.ext import commands
+import logging
 
-# OpenAI new client
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None  # will handle later
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
+logger = logging.getLogger("bot")
 # ---------------- Load konfigurasi ----------------
 load_dotenv()
 BOT_NAME = os.getenv("BOT_NAME", "n1nja")
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 USE_DCODE = os.getenv("USE_DCODE", "true").lower() == "true"
 PASTE_PROVIDER = os.getenv("PASTE_PROVIDER", "spaste")
 PASTE_EXPIRY = os.getenv("PASTE_EXPIRY", "1d")
@@ -47,15 +49,7 @@ MAX_HISTORY_STORE = int(os.getenv("MAX_HISTORY_STORE", "1000") or 1000)
 DB_FILE = os.getenv("DB_FILE", "/tmp/n1nja.db")
 DCODE_API = os.getenv("DCODE_API", "https://www.dcode.fr/api/")
 
-# Create OpenAI client if possible
-OPENAI_CLIENT = None
-if OpenAI is not None and OPENAI_KEY:
-    try:
-        OPENAI_CLIENT = OpenAI(api_key=OPENAI_KEY)
-    except Exception:
-        OPENAI_CLIENT = None
-
-# ---------------- Flask app (exported for Gunicorn) ----------------
+# ---------------- Flask app (export for Gunicorn) ----------------
 app = Flask(__name__)
 
 # ---------------- Bot setup ----------------
@@ -71,7 +65,6 @@ def get_sqlite_connection():
         d = os.path.dirname(db_file)
         if d:
             os.makedirs(d, exist_ok=True)
-        # Ensure file exists (touch)
         with open(db_file, "a"):
             pass
         conn_local = sqlite3.connect(db_file, check_same_thread=False)
@@ -149,7 +142,8 @@ async def paste_text_spaste(text: str, expiry: str = "1d") -> Optional[str]:
                 if resp.status != 200:
                     return None
                 j = await resp.json()
-                # doku spaste may return paste_url or result fields
+                if isinstance(j, dict) and j.get("status") == "success" and j.get("paste_url"):
+                    return j.get("paste_url")
                 if isinstance(j, dict) and j.get("paste_url"):
                     return j.get("paste_url")
     except Exception:
@@ -171,13 +165,13 @@ async def safe_send(channel, text: str):
             return
         url = await paste_text(text)
         if url:
-            await channel.send("📄 Output panjang disimpan di: " + url)
+            await channel.send("ð Output panjang disimpan di: " + url)
             return
         for i in range(0, len(text), max_len):
             await channel.send("```" + text[i:i+max_len] + "```")
     except Exception:
         try:
-            await channel.send("⚠️ Gagal kirim output. Cek logs.")
+            await channel.send("â ï¸ Gagal kirim output. Cek logs.")
         except Exception:
             pass
 
@@ -345,25 +339,21 @@ def auto_decode_recursive(data: bytes, max_depth=3) -> List[Tuple[str, bytes]]:
             return
         seen.add(key)
         results.append((label, d))
-        # base64
         try:
             b64 = base64.b64decode(d, validate=True)
             rec(b64, depth + 1, label + "->base64")
         except Exception:
             pass
-        # hex
         try:
             hx = binascii.unhexlify(d)
             rec(hx, depth + 1, label + "->hex")
         except Exception:
             pass
-        # base32
         try:
             b32 = base64.b32decode(d)
             rec(b32, depth + 1, label + "->base32")
         except Exception:
             pass
-        # base58
         try:
             s = d.decode(errors="ignore")
             b58 = b58_decode(s)
@@ -373,41 +363,103 @@ def auto_decode_recursive(data: bytes, max_depth=3) -> List[Tuple[str, bytes]]:
     rec(data, 0, "raw")
     return results
 
-# ---------------- dCode lookup ----------------
-async def lookup_hash_dcode(hashtext: str, use_cache=True, cache_ttl=3600) -> Optional[str]:
-    if not USE_DCODE:
+
+# ---------------- Hash Identifier helpers ----------------
+async def lookup_hash_hashescom(hashtext: str) -> Optional[str]:
+    """Identify hash using official hashes.com API."""
+    try:
+        url = "https://hashes.com/en/api/identifier"
+        params = {"hash": hashtext, "extended": "true"}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=20) as resp:
+                text = await resp.text()
+                try:
+                    j = json.loads(text)
+                except Exception:
+                    logger.error("Hashes.com API non-JSON response: %s", text[:200])
+                    return None
+
+                if not j.get("success"):
+                    logger.warning("Hashes.com API failed: %s", j)
+                    return None
+
+                algos = j.get("algorithms") or []
+                if not algos:
+                    return None
+
+                out = ["Hashes.com identifikasi:"]
+                for i, a in enumerate(algos[:15], 1):
+                    out.append(f"{i}. {a}")
+                return "\n".join(out)
+    except Exception as e:
+        logger.exception("lookup_hash_hashescom error")
         return None
-    if use_cache and hashtext in _provider_cache:
-        ts, val = _provider_cache[hashtext]
+
+def lookup_hashid_local(hashtext: str) -> Optional[str]:
+    """Use local `hashid` library if available as a fallback."""
+    try:
+        from hashid import HashID
+    except Exception as e:
+        logger.warning("hashid library tidak terpasang: %s", e)
+        return None
+    try:
+        hid = HashID()
+        guesses = list(hid.identifyHash(hashtext))
+        if not guesses:
+            return None
+        lines = ["Fallback lokal (hashid):"]
+        for i, g in enumerate(guesses[:12]):
+            name = getattr(g, "name", None) or getattr(g, "title", None) or str(g)
+            lines.append(f"{i+1}. {name}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.exception("lookup_hashid_local error: %s", e)
+        return None
+
+
+async def lookup_hash_online(hashtext: str, use_cache: bool = True, cache_ttl: int = 3600) -> str:
+    """Lookup order: 1) hashes.com API, 2) local hashid, 3) heuristics. Combines results."""
+    ht = hashtext.strip()
+    if not ht:
+        return "Hash kosong."
+
+    # cache check
+    if use_cache and ht in _provider_cache:
+        ts, val = _provider_cache[ht]
         if time.time() - ts < cache_ttl:
             return val
-    url = DCODE_API
-    data = {"tool": "hash-identifier", "hash": hashtext}
-    headers = {
-        "User-Agent": "Mozilla/5.0 n1nja-bot",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://www.dcode.fr/hash-identifier",
-        "Origin": "https://www.dcode.fr"
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, headers=headers, timeout=15) as resp:
-                if resp.status != 200:
-                    return None
-                j = await resp.json()
-                results = j.get("results") if isinstance(j, dict) else None
-                if results and isinstance(results, list) and len(results) > 0:
-                    lines = ["Hasil dCode (kemungkinan algoritma):"]
-                    for i, r in enumerate(results[:12]):
-                        lines.append("%d. %s" % (i+1, r))
-                    out = "\n".join(lines)
-                    _provider_cache[hashtext] = (time.time(), out)
-                    return out
-    except Exception:
-        return None
-    return None
+
+    result_parts = []
+
+    online_result = await lookup_hash_hashescom(ht)
+    if online_result:
+        result_parts.append(online_result)
+
+    local_result = lookup_hashid_local(ht)
+    if local_result:
+        result_parts.append(local_result)
+
+    if not result_parts:
+        s = re.sub(r'[^0-9a-fA-F]', '', ht)
+        L = len(s)
+        heur = []
+        if ":" in ht:
+            heur.append("Hash mengandung ':' — kemungkinan fingerprint/salted format (periksa manual).")
+        if L == 32:
+            heur.append("Panjang 32 hex → kemungkinan MD5/NTLM.")
+        elif L == 40:
+            heur.append("Panjang 40 hex → kemungkinan SHA1/RipeMD-160.")
+        elif L == 64:
+            heur.append("Panjang 64 hex → kemungkinan SHA256.")
+        elif L == 128:
+            heur.append("Panjang 128 hex → kemungkinan SHA512.")
+        elif L > 0:
+            heur.append(f"Panjang (hex-only) = {L}; tidak umum atau bukan pure hex.")
+        result_parts.append("Tebakan lokal (heuristik):\n" + "\n".join(heur))
+
+    out = "\n\n".join(result_parts)
+    _provider_cache[ht] = (time.time(), out)
+    return out
 
 # ---------------- Rate-limit helper ----------------
 def rate_limit_ok(user_id):
@@ -420,13 +472,19 @@ def rate_limit_ok(user_id):
 
 # ---------------- HELP text ----------------
 HELP_TEXT = (
-    BOT_NAME + " — Perintah utama (Bahasa Indonesia)\n"
-    "Perintah umum:\n"
+    "       _        _       \n"
+    " _ __ / |_ __  (_) __ _ \n"
+    "| '_ \\| | '_ \\ | |/ _` |\n"
+    "| | | | | | | || | (_| |\n"
+    "|_| |_|_|_| |_|/ |\\__,_|\n"
+    "             |__/       \n"
+    + BOT_NAME + " - Cybersecurity & CTF Helper bot.\n\n"
+    "Available Commands:\n"
     "- !ctfhelp : tampilkan bantuan\n"
     "- !solve <teks> : auto-decode rekursif (base64/hex/base32/base58) + deteksi flag\n"
     "- !decode <type> <teks> : contoh: !decode base64 SGVsbG8=\n"
     "- !encode <type> <teks> : base64/hex/url\n"
-    "- !hashid <hash> : tebak hash & (opsional) lookup dCode\n"
+    "- !hashid <hash> : identifikasi hash (prioritas: hashes.com → hashid lokal → heuristik)\n"
     "- !xorbrute <data> : brute single-byte XOR\n"
     "- !caesar <shift> <teks> : Caesar cipher\n"
     "- !vigenere enc|dec <key> <teks>\n"
@@ -441,13 +499,15 @@ HELP_TEXT = (
     "- !ask <pertanyaan> : tanya AI (OPENAI_API_KEY dibutuhkan)\n"
     "- !prompt-set <text> : owner-only: set system prompt untuk AI\n"
     "- !history [limit] : lihat riwayat perintah mu\n"
+    "\n" + BOT_NAME + " - github.com/Rosemary1337/n1nja\n"
 )
+
 
 # ---------------- Commands (complete) ----------------
 @bot.event
 async def on_ready():
     try:
-        await bot.change_presence(activity=discord.Game(name=BOT_NAME + " — CTF helper"))
+        await bot.change_presence(activity=discord.Game(name=BOT_NAME + " â CTF helper"))
     except Exception:
         pass
     print("%s siap, logged in as %s" % (BOT_NAME, str(bot.user)))
@@ -518,27 +578,18 @@ async def cmd_encode(ctx, dtype: str, *, teks: str):
     save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "encode " + d, teks, out)
     await safe_send(ctx.channel, out)
 
+
 @bot.command(name="hashid")
 async def cmd_hashid(ctx, *, hashtext: str):
     if not rate_limit_ok(ctx.author.id):
-        await ctx.send("Tunggu sebentar.")
+        await ctx.send("Tunggu sebentar sebelum kirim perintah lain.")
         return
-    cleaned = re.sub(r"[^0-9a-fA-F]", "", hashtext)
-    guesses = HASH_GUESSES.get(len(cleaned), [])
-    lines = []
-    if guesses:
-        lines.append("Tebakan lokal: " + ", ".join(guesses))
-    else:
-        lines.append("Tebakan lokal: tidak diketahui (berdasarkan panjang)")
-    external = await lookup_hash_dcode(hashtext)
-    if external:
-        lines.append(external)
-    else:
-        lines.append("Lookup dCode gagal atau tidak aktif.")
-    out = "\n".join(lines)
-    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "hashid", hashtext, out)
+    try:
+        out = await lookup_hash_online(hashtext)
+    except Exception as e:
+        out = "Error lookup hash: %s" % str(e)
+    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "hashid", hashtext, out[:4000])
     await safe_send(ctx.channel, out)
-
 @bot.command(name="solve")
 async def cmd_solve(ctx, *, teks: str):
     if not rate_limit_ok(ctx.author.id):
@@ -806,50 +857,33 @@ async def cmd_history(ctx, limit: int = 10):
 # ---------------- AI (OpenAI) ----------------
 @bot.command(name="ask")
 async def cmd_ask(ctx, *, prompt: str):
-    if not OPENAI_KEY or OPENAI_CLIENT is None:
-        await ctx.send("OPENAI_API_KEY belum dikonfigurasi atau OpenAI client tidak tersedia.")
+    if not OPENAI_KEY:
+        await ctx.send("OPENAI_API_KEY belum dikonfigurasi.")
         return
     if not rate_limit_ok(ctx.author.id):
         await ctx.send("Tunggu sebentar.")
         return
     try:
-        # read system prompt from kv
+        import openai
+        openai.api_key = OPENAI_KEY
+    except Exception:
+        await ctx.send("OpenAI SDK tidak terpasang. Tambahkan openai di requirements.")
+        return
+    try:
+        await ctx.typing()
+
         cur2 = conn.execute("SELECT v FROM kv WHERE k=?", ("n1nja_system_prompt",))
         row = cur2.fetchone()
         if row:
             sp = row[0]
         else:
-            sp = "Anda adalah n1nja, asisten CTF ringkas dan aman. Beri petunjuk decoding/analisis, bukan instruksi berbahaya."
-        # typing indicator
-        async with ctx.typing():
-            # call OpenAI in thread to avoid blocking
-            def do_call():
-                try:
-                    resp = OPENAI_CLIENT.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": sp},
-                            {"role": "user", "content": prompt}
-                        ],
-                        max_tokens=800,
-                        temperature=0.25
-                    )
-                    # new client returns object; extract string safely
-                    text = None
-                    try:
-                        # resp.choices[0].message.content or resp.choices[0].message['content']
-                        text = resp.choices[0].message.content
-                    except Exception:
-                        try:
-                            text = resp.choices[0].text
-                        except Exception:
-                            text = str(resp)
-                    return text
-                except Exception as e:
-                    return "OpenAI call failed: %s" % str(e)
-            out = await asyncio.to_thread(do_call)
-        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "ask", prompt, (out or "")[:4000])
-        await safe_send(ctx.channel, out or "[kosong]")
+            sp = "Nama anda adalah n1nja, asisten CTF, Cybersecurity, bug bounty dan vulnerability researcher ringkas dan pintar. Beri petunjuk decoding/analisis. output anda harus plaintext"
+        def call_openai():
+            return openai.ChatCompletion.create(model="gpt-4o-mini", messages=[{"role":"system","content":sp},{"role":"user","content":prompt}], max_tokens=800, temperature=0.25)
+        resp = await asyncio.to_thread(call_openai)
+        out = resp.choices[0].message.content
+        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "ask", prompt, out[:4000])
+        await safe_send(ctx.channel, out)
     except Exception as e:
         await ctx.send("AI Error: " + str(e))
 
@@ -858,12 +892,9 @@ async def cmd_prompt_set(ctx, *, prompt: str):
     if OWNER_ID != 0 and ctx.author.id != OWNER_ID:
         await ctx.send("Hanya owner yang dapat mengubah prompt.")
         return
-    try:
-        conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", ("n1nja_system_prompt", prompt))
-        conn.commit()
-        await ctx.send("System prompt diperbarui.")
-    except Exception as e:
-        await ctx.send("Prompt set error: " + str(e))
+    conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", ("n1nja_system_prompt", prompt))
+    conn.commit()
+    await ctx.send("System prompt diperbarui.")
 
 # ---------------- Keep-alive & debug endpoints ----------------
 @app.route("/")
@@ -910,13 +941,11 @@ def run_bot_thread():
         try:
             bot.run(DISCORD_TOKEN)
         except Exception as e:
-            # show compact message without leaking token
-            print("Bot thread exited with error: %s" % str(e))
+            print("Bot thread exited with error:", str(e))
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     print("Discord bot thread started (daemon).")
 
-# Start bot thread on import (so Gunicorn worker will spawn Flask and bot runs in background)
 run_bot_thread()
 
 # ---------------- Main (dev server) ----------------
