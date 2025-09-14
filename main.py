@@ -1,6 +1,6 @@
-# main.py - n1nja (CTF Swiss Army Knife)
-# Gunicorn-ready, Flask keep-alive, Discord bot thread, SQLite fallback, Bahasa Indonesia.
-# No f-strings. Use "%" formatting.
+# main.py - n1nja (CTF Swiss Army Knife) - Gunicorn-ready
+# Bahasa Indonesia, konsisten indentasi (4 spasi), tidak memakai f-strings.
+# Pastikan requirements terinstall dan .env terisi.
 
 import os
 import re
@@ -26,11 +26,17 @@ from PIL import Image, ExifTags
 import discord
 from discord.ext import commands
 
+# OpenAI new client
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None  # will handle later
+
 # ---------------- Load konfigurasi ----------------
 load_dotenv()
 BOT_NAME = os.getenv("BOT_NAME", "n1nja")
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
-OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 USE_DCODE = os.getenv("USE_DCODE", "true").lower() == "true"
 PASTE_PROVIDER = os.getenv("PASTE_PROVIDER", "spaste")
 PASTE_EXPIRY = os.getenv("PASTE_EXPIRY", "1d")
@@ -40,6 +46,14 @@ RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "1") or 1)
 MAX_HISTORY_STORE = int(os.getenv("MAX_HISTORY_STORE", "1000") or 1000)
 DB_FILE = os.getenv("DB_FILE", "/tmp/n1nja.db")
 DCODE_API = os.getenv("DCODE_API", "https://www.dcode.fr/api/")
+
+# Create OpenAI client if possible
+OPENAI_CLIENT = None
+if OpenAI is not None and OPENAI_KEY:
+    try:
+        OPENAI_CLIENT = OpenAI(api_key=OPENAI_KEY)
+    except Exception:
+        OPENAI_CLIENT = None
 
 # ---------------- Flask app (exported for Gunicorn) ----------------
 app = Flask(__name__)
@@ -57,7 +71,7 @@ def get_sqlite_connection():
         d = os.path.dirname(db_file)
         if d:
             os.makedirs(d, exist_ok=True)
-        # create file if not exist
+        # Ensure file exists (touch)
         with open(db_file, "a"):
             pass
         conn_local = sqlite3.connect(db_file, check_same_thread=False)
@@ -135,8 +149,7 @@ async def paste_text_spaste(text: str, expiry: str = "1d") -> Optional[str]:
                 if resp.status != 200:
                     return None
                 j = await resp.json()
-                if isinstance(j, dict) and j.get("status") == "success" and j.get("paste_url"):
-                    return j.get("paste_url")
+                # doku spaste may return paste_url or result fields
                 if isinstance(j, dict) and j.get("paste_url"):
                     return j.get("paste_url")
     except Exception:
@@ -405,6 +418,31 @@ def rate_limit_ok(user_id):
     _last_cmd_ts[user_id] = now
     return True
 
+# ---------------- HELP text ----------------
+HELP_TEXT = (
+    BOT_NAME + " — Perintah utama (Bahasa Indonesia)\n"
+    "Perintah umum:\n"
+    "- !ctfhelp : tampilkan bantuan\n"
+    "- !solve <teks> : auto-decode rekursif (base64/hex/base32/base58) + deteksi flag\n"
+    "- !decode <type> <teks> : contoh: !decode base64 SGVsbG8=\n"
+    "- !encode <type> <teks> : base64/hex/url\n"
+    "- !hashid <hash> : tebak hash & (opsional) lookup dCode\n"
+    "- !xorbrute <data> : brute single-byte XOR\n"
+    "- !caesar <shift> <teks> : Caesar cipher\n"
+    "- !vigenere enc|dec <key> <teks>\n"
+    "- !atbash <teks>\n"
+    "- !rot13 <teks>\n"
+    "- !strings : extract printable strings dari file terlampir\n"
+    "- !stego : upload file lalu jalankan (EXIF, LSB, strings, hexdump)\n"
+    "- !fileinfo : informasi file (hash, ukuran)\n"
+    "- !hexdump <hex|base64> : tampilkan hexdump\n"
+    "- !jwt <token> : decode JWT header/payload\n"
+    "- !url <decode|encode> <url>\n"
+    "- !ask <pertanyaan> : tanya AI (OPENAI_API_KEY dibutuhkan)\n"
+    "- !prompt-set <text> : owner-only: set system prompt untuk AI\n"
+    "- !history [limit] : lihat riwayat perintah mu\n"
+)
+
 # ---------------- Commands (complete) ----------------
 @bot.event
 async def on_ready():
@@ -416,656 +454,7 @@ async def on_ready():
 
 @bot.command(name="ctfhelp")
 async def cmd_ctfhelp(ctx):
-    txt = (
-        BOT_NAME + " — Perintah utama (Bahasa Indonesia)\n"
-        + "!solve <teks> — auto-decode rekursif (base64/hex/base32/base58) + deteksi flag\n"
-        + "!decode <type> <teks> — contoh: !decode base64 SGVsbG8=\n"
-        + "!encode <type> <teks> — base64/hex/url\n"
-        + "!hashid <hash> — tebak hash & (opsional) lookup dCode\n"
-        + "!xorbrute <data> — brute single-byte XOR\n"
-        + "!caesar <shift> <teks> — Caesar cipher\n"
-        + "!vigenere enc|dec <key> <teks>\n"
-        + "!atbash <teks>\n"
-        + "!rot13 <teks>\n"
-        + "!strings — extract printable strings dari file terlampir\n"
-        + "!stego — upload file lalu jalankan (EXIF, LSB, strings, hexdump)\n"
-        + "!fileinfo — informasi file (hash, ukuran)\n"
-        + "!hexdump <hex|base64> — tampilkan hexdump\n"
-        + "!jwt <token> — decode JWT header/payload\n"
-        + "!url <decode|encode> <url>\n"
-        + "!ask <pertanyaan> — tanya AI (OPENAI_API_KEY dibutuhkan)\n"
-        + "!prompt-set <text> — owner-only: set system prompt untuk AI\n"
-        + "!history [limit] — lihat riwayat perintah mu\n"
-    )
-    await safe_send(ctx.channel, txt)
-
-@bot.command(name="decode")
-async def cmd_decode(ctx, dtype: str, *, teks: str):
-    if not rate_limit_ok(ctx.author.id):
-        await ctx.send("Tunggu sebentar sebelum kirim perintah lain.")
-        return
-    d = dtype.lower()
-    out = ""
-    if d == "base64":
-        b = try_base64(teks)
-        if b:
-            try:
-                out = b.decode("utf-8", errors="ignore")
-            except Exception:
-                out = b.hex()
-        else:
-            out = "Gagal decode base64."
-    elif d == "hex":
-        b = try_hex(teks)
-        if b:
-            try:
-                out = b.decode("utf-8", errors="ignore")
-            except Exception:
-                out = b.hex()
-        else:
-            out = "Gagal decode hex."
-    elif d == "base32":
-        b = try_base32(teks)
-        if b:
-            try:
-                out = b.decode("utf-8", errors="ignore")
-            except Exception:
-                out = b.hex()
-        else:
-            out = "Gagal decode base32."
-    elif d == "rot13":
-        out = codecs.decode(teks, "rot_13")
-    elif d == "atbash":
-        out = atbash(teks)
-    else:
-        out = "Tipe decode tidak dikenal."
-    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "decode " + d, teks, out[:4000])
-    await safe_send(ctx.channel, out)
-
-@bot.command(name="encode")
-async def cmd_encode(ctx, dtype: str, *, teks: str):
-    if not rate_limit_ok(ctx.author.id):
-        await ctx.send("Tunggu sebentar.")
-        return
-    d = dtype.lower()
-    out = ""
-    if d == "base64":
-        out = base64.b64encode(teks.encode()).decode()
-    elif d == "hex":
-        out = teks.encode().hex()
-    elif d == "url":
-        from urllib.parse import quote
-        out = quote(teks)
-    else:
-        out = "Tipe encode tidak dikenal."
-    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "encode " + d, teks, out)
-    await safe_send(ctx.channel, out)
-
-@bot.command(name="hashid")
-async def cmd_hashid(ctx, *, hashtext: str):
-    if not rate_limit_ok(ctx.author.id):
-        await ctx.send("Tunggu sebentar.")
-        return
-    cleaned = re.sub(r"[^0-9a-fA-F]", "", hashtext)
-    guesses = HASH_GUESSES.get(len(cleaned), [])
-    lines = []
-    if guesses:
-        lines.append("Tebakan lokal: " + ", ".join(guesses))
-    else:
-        lines.append("Tebakan lokal: tidak diketahui (berdasarkan panjang)")
-    external = await lookup_hash_dcode(hashtext)
-    if external:
-        lines.append(external)
-    else:
-        lines.append("Lookup dCode gagal atau tidak aktif.")
-    out = "\n".join(lines)
-    save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "hashid", hashtext, out)
-    await safe_send(ctx.channel, out)
-
-@bot.command(name="solve")
-async def cmd_solve(ctx, *, teks: str):
-    if not rate_limit_ok(ctx.author.id):
-        await ctx.send("Tunggu sebentar.")
-        return
-    try:
-        b = teks.encode()
-        decs = auto_decode_recursive(b, max_depth=3)
-        lines = []
-        for label, data in decs:
-            try:
-                preview = data.decode("utf-8", errors="ignore")
-            except Exception:
-                preview = data.hex()
-            flags = find_flags(preview)
-            lines.append("[" + label + "]\n" + preview[:800])
-            if flags:
-                lines.append("  >> flag terdeteksi: " + ", ".join(flags))
-        out = "\n\n".join(lines[:30])
-        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "solve", teks, out[:4000])
-        await safe_send(ctx.channel, out)
-    except Exception as e:
-        await ctx.send("Error saat solve: " + str(e))
-
-@bot.command(name="xorbrute")
-async def cmd_xorbrute(ctx, *, data: str):
-    if not rate_limit_ok(ctx.author.id):
-        await ctx.send("Tunggu sebentar.")
-        return
-    try:
-        parsed = None
-        if is_hex(data):
-            parsed = try_hex(data)
-        else:
-            parsed = try_base64(data) or data.encode()
-        res = single_xor_bruteforce(parsed, top=12)
-        lines = []
-        for sc, k, outb in res:
-            try:
-                pr = outb.decode("utf-8", errors="ignore")
-            except Exception:
-                pr = outb.hex()
-            lines.append("k=0x%02x score=%d\n%s" % (k, sc, pr[:800]))
-        outt = "\n\n".join(lines)
-        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "xorbrute", data, outt[:4000])
-        await safe_send(ctx.channel, outt)
-    except Exception as e:
-        await ctx.send("XOR error: " + str(e))
-
-@bot.command(name="caesar")
-async def cmd_caesar(ctx, shift: int, *, teks: str):
-    if not rate_limit_ok(ctx.author.id):
-        await ctx.send("Tunggu sebentar.")
-        return
-    try:
-        out = caesar_shift(teks, shift)
-        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "caesar", str(shift) + "|" + teks, out)
-        await safe_send(ctx.channel, out)
-    except Exception as e:
-        await ctx.send("Caesar error: " + str(e))
-
-@bot.command(name="vigenere")
-async def cmd_vigenere(ctx, mode: str, key: str, *, teks: str):
-    if not rate_limit_ok(ctx.author.id):
-        await ctx.send("Tunggu sebentar.")
-        return
-    try:
-        if mode.lower(OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
-KEEP_ALIVE_PORT = int(os.getenv("KEEP_ALIVE_PORT", "8080") or 8080)
-RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "1") or 1)
-MAX_HISTORY_STORE = int(os.getenv("MAX_HISTORY_STORE", "1000") or 1000)
-
-# ---------------- Flask app (exported for Gunicorn) ----------------
-app = Flask(__name__)
-
-# ---------------- Bot setup ----------------
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-
-# ---------------- DB (SQLite safe) ----------------
-def get_sqlite_connection():
-    db_file = "/tmp/n1nja.db"
-    conn_local = None
-    try:
-        os.makedirs("/tmp", exist_ok=True)
-        with open(db_file, "a"):
-            pass
-        conn_local = sqlite3.connect(db_file, check_same_thread=False)
-        print("DB jalan di %s" % db_file)
-    except Exception as e:
-        print("SQLite file gagal (%s), fallback ke in-memory" % str(e))
-        conn_local = sqlite3.connect(":memory:", check_same_thread=False)
-        print("DB in-memory aktif")
-    return conn_local
-
-conn = get_sqlite_connection()
-cur = conn.cursor()
-
-def db_init():
-    try:
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS history(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id TEXT,
-            user_id TEXT,
-            command TEXT,
-            input TEXT,
-            output TEXT,
-            ts DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS kv(k TEXT PRIMARY KEY, v TEXT)
-        """)
-        conn.commit()
-    except Exception as e:
-        print("DB init error: %s" % str(e))
-
-db_init()
-
-# ---------------- Constants/regex ----------------
-HEX_RE = re.compile(r'^[0-9a-fA-F]+$')
-BASE64_RE = re.compile(r'^[A-Za-z0-9+/=\n\r]+$')
-BASE32_RE = re.compile(r'^[A-Z2-7=\n\r]+$', re.IGNORECASE)
-B58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-B58_MAP = {c: i for i, c in enumerate(B58_ALPHABET)}
-FLAG_PATTERNS = [r'CTF\{[^}]{3,}\}', r'flag\{[^}]{3,}\}', r'[A-Za-z0-9_{}-]{8,}']
-COMMON_WORDS = [b'the', b'flag', b'ctf', b'and', b'http', b'admin']
-HASH_GUESSES = {
-    32: ['MD5', 'NTLM', 'LM'],
-    40: ['SHA-1', 'RIPEMD-160'],
-    56: ['SHA-224'],
-    64: ['SHA-256', 'SHA3-256'],
-    96: ['SHA-384', 'SHA3-384'],
-    128: ['SHA-512', 'SHA3-512']
-}
-_provider_cache = {}
-_last_cmd_ts = defaultdict(lambda: 0.0)
-
-# ---------------- Utilities ----------------
-def save_history(guild_id, user_id, command, inp, out):
-    try:
-        cur.execute("INSERT INTO history(guild_id,user_id,command,input,output) VALUES(?,?,?,?,?)",
-                    (str(guild_id), str(user_id), command, (inp or "")[:4000], (out or "")[:4000]))
-        cur.execute("SELECT COUNT(*) FROM history")
-        total = cur.fetchone()[0]
-        if total > MAX_HISTORY_STORE:
-            cur.execute("DELETE FROM history WHERE id IN (SELECT id FROM history ORDER BY id ASC LIMIT ?)", (total - MAX_HISTORY_STORE,))
-        conn.commit()
-    except Exception:
-        pass
-
-async def paste_text_spaste(text: str, expiry: str = "1d") -> Optional[str]:
-    url = "https://spaste.us/api/v1/paste"
-    payload = {"content": text, "syntax": "text", "expiry": expiry}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=20) as resp:
-                if resp.status != 200:
-                    return None
-                j = await resp.json()
-                if isinstance(j, dict) and j.get("status") == "success" and j.get("paste_url"):
-                    return j.get("paste_url")
-                if isinstance(j, dict) and j.get("paste_url"):
-                    return j.get("paste_url")
-    except Exception:
-        return None
-    return None
-
-async def paste_text(text: str) -> Optional[str]:
-    if PASTE_PROVIDER == "spaste":
-        return await paste_text_spaste(text, expiry=PASTE_EXPIRY)
-    return None
-
-async def safe_send(channel, text: str):
-    if text is None:
-        return
-    try:
-        max_len = 1900
-        if len(text) <= max_len:
-            await channel.send("```" + text + "```")
-            return
-        url = await paste_text(text)
-        if url:
-            await channel.send("📄 Output panjang disimpan di: " + url)
-            return
-        for i in range(0, len(text), max_len):
-            await channel.send("```" + text[i:i+max_len] + "```")
-    except Exception:
-        try:
-            await channel.send("⚠️ Gagal kirim output. Cek logs.")
-        except Exception:
-            pass
-
-def find_flags(text: str) -> List[str]:
-    found = []
-    for p in FLAG_PATTERNS:
-        for m in re.findall(p, text, flags=re.IGNORECASE):
-            if m not in found:
-                found.append(m)
-    return found
-
-# ---------------- Binary helpers ----------------
-def extract_strings(data: bytes, min_len: int = 4) -> List[str]:
-    res = []
-    current = bytearray()
-    for b in data:
-        if 32 <= b < 127:
-            current.append(b)
-        else:
-            if len(current) >= min_len:
-                res.append(current.decode("utf-8", errors="ignore"))
-            current = bytearray()
-    if len(current) >= min_len:
-        res.append(current.decode("utf-8", errors="ignore"))
-    return res
-
-def hexdump(data: bytes, length=16) -> str:
-    lines = []
-    for i in range(0, len(data), length):
-        chunk = data[i:i+length]
-        hex_bytes = " ".join(["%02x" % b for b in chunk])
-        ascii_bytes = "".join([chr(b) if 32 <= b < 127 else "." for b in chunk])
-        lines.append("%08x  %s  %s" % (i, hex_bytes.ljust(length * 3), ascii_bytes))
-    return "\n".join(lines[:400])
-
-# ---------------- Encoding / decoding ----------------
-def is_hex(s: str) -> bool:
-    s2 = s.strip().replace(" ", "")
-    return bool(HEX_RE.match(s2)) and len(s2) % 2 == 0
-
-def is_base64(s: str) -> bool:
-    s2 = s.strip()
-    if len(s2) % 4 != 0:
-        return False
-    return bool(BASE64_RE.match(s2))
-
-def try_base64(s: str) -> Optional[bytes]:
-    try:
-        return base64.b64decode(s, validate=True)
-    except Exception:
-        try:
-            return base64.b64decode(s + "==")
-        except Exception:
-            return None
-
-def try_hex(s: str) -> Optional[bytes]:
-    try:
-        s2 = re.sub(r"[^0-9a-fA-F]", "", s)
-        return bytes.fromhex(s2)
-    except Exception:
-        return None
-
-def try_base32(s: str) -> Optional[bytes]:
-    try:
-        return base64.b32decode(s)
-    except Exception:
-        return None
-
-def b58_decode(s: str) -> bytes:
-    num = 0
-    for ch in s:
-        if ch not in B58_MAP:
-            raise ValueError("Invalid base58 char")
-        num = num * 58 + B58_MAP[ch]
-    full = num.to_bytes((num.bit_length() + 7) // 8, "big") or b"\x00"
-    n_pad = len(s) - len(s.lstrip("1"))
-    return b"\x00" * n_pad + full
-
-# ---------------- Crypto helpers ----------------
-def score_plaintext(b: bytes) -> int:
-    s = 0
-    low = b.lower()
-    for w in COMMON_WORDS:
-        if w.lower() in low:
-            s += 10
-    printable = sum(1 for c in b if 32 <= c < 127)
-    s += int((printable / max(1, len(b))) * 20)
-    return s
-
-def single_xor_bruteforce(data: bytes, top=6):
-    res = []
-    for k in range(256):
-        out = bytes([c ^ k for c in data])
-        sc = score_plaintext(out)
-        res.append((sc, k, out))
-    res.sort(reverse=True, key=lambda x: x[0])
-    return res[:top]
-
-def caesar_shift(text: str, shift: int) -> str:
-    out = ""
-    for ch in text:
-        if ch.isalpha():
-            base = ord("A") if ch.isupper() else ord("a")
-            out += chr((ord(ch) - base + shift) % 26 + base)
-        else:
-            out += ch
-    return out
-
-def atbash(text: str) -> str:
-    out = ""
-    for ch in text:
-        if ch.isupper():
-            out += chr(90 - (ord(ch) - 65))
-        elif ch.islower():
-            out += chr(122 - (ord(ch) - 97))
-        else:
-            out += ch
-    return out
-
-def vigenere(text: str, key: str, decrypt=False) -> str:
-    out = ""
-    ki = 0
-    for ch in text:
-        if ch.isalpha():
-            base = ord("A") if ch.isupper() else ord("a")
-            kch = key[ki % len(key)]
-            shift = ord(kch.upper()) - ord("A")
-            if decrypt:
-                shift = -shift
-            out += chr((ord(ch) - base + shift) % 26 + base)
-            ki += 1
-        else:
-            out += ch
-    return out
-
-# ---------------- LSB stego ----------------
-def lsb_extract(img: Image.Image, bits=1, max_bytes=8192) -> bytes:
-    img = img.convert("RGB")
-    pixels = list(img.getdata())
-    bits_stream = []
-    for px in pixels:
-        for c in px:
-            bits_stream.append(c & ((1 << bits) - 1))
-    bits_flat = []
-    for val in bits_stream:
-        for b in range(bits - 1, -1, -1):
-            bits_flat.append((val >> b) & 1)
-    out = bytearray()
-    for i in range(0, min(len(bits_flat), max_bytes * 8), 8):
-        byte = 0
-        for j in range(8):
-            byte = (byte << 1) | bits_flat[i + j]
-        out.append(byte)
-    return bytes(out).rstrip(b"\x00")
-
-# ---------------- Auto decode recursive ----------------
-def auto_decode_recursive(data: bytes, max_depth=3) -> List[Tuple[str, bytes]]:
-    results = []
-    seen = set()
-    def rec(d: bytes, depth: int, label: str):
-        if depth > max_depth:
-            return
-        key = (label, d)
-        if key in seen:
-            return
-        seen.add(key)
-        results.append((label, d))
-        # base64
-        try:
-            b64 = base64.b64decode(d, validate=True)
-            rec(b64, depth + 1, label + "->base64")
-        except Exception:
-            pass
-        # hex
-        try:
-            hx = binascii.unhexlify(d)
-            rec(hx, depth + 1, label + "->hex")
-        except Exception:
-            pass
-        # base32
-        try:
-            b32 = base64.b32decode(d)
-            rec(b32, depth + 1, label + "->base32")
-        except Exception:
-            pass
-        # base58
-        try:
-            s = d.decode(errors="ignore")
-            b58 = b58_decode(s)
-            rec(b58, depth + 1, label + "->base58")
-        except Exception:
-            pass
-    rec(data, 0, "raw")
-    return results
-
-# ---------------- dCode lookup ----------------
-async def lookup_hash_dcode(hashtext: str, use_cache=True, cache_ttl=3600) -> Optional[str]:
-    if not USE_DCODE:
-        return None
-    if use_cache and hashtext in _provider_cache:
-        ts, val = _provider_cache[hashtext]
-        if time.time() - ts < cache_ttl:
-            return val
-    url = "https://www.dcode.fr/api/"
-    data = {"tool": "hash-identifier", "hash": hashtext}
-    headers = {
-        "User-Agent": "Mozilla/5.0 n1nja-bot",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://www.dcode.fr/hash-identifier",
-        "Origin": "https://www.dcode.fr"
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, headers=headers, timeout=15) as resp:
-                if resp.status != 200:
-                    return None
-                j = await resp.json()
-                results = j.get("results") if isinstance(j, dict) else None
-                if results and isinstance(results, list) and len(results) > 0:
-                    lines = ["Hasil dCode (kemungkinan algoritma):"]
-                    for i, r in enumerate(results[:12]):
-                        lines.append("%d. %s" % (i+1, r))
-                    out = "\n".join(lines)
-                    _provider_cache[hashtext] = (time.time(), out)
-                    return out
-    except Exception:
-        return None
-    return None
-
-# ---------------- Rate-limit helper ----------------
-def rate_limit_ok(user_id):
-    now = time.time()
-    last = _last_cmd_ts[user_id]
-    if now - last < RATE_LIMIT_SECONDS:
-        return False
-    _last_cmd_ts[user_id] = now
-    return True
-
-# ---------------- Commands ----------------
-@bot.event
-async def on_ready():
-    try:
-        await bot.change_presence(activity=discord.Game(name=BOT_NAME + " — CTF helper"))
-    except Exception:
-        pass
-    print("%s siap, logged in as %s" % (BOT_NAME, str(bot.user)))
-
-@bot.command(name="ctfhelp")
-async def cmd_ctfhelp(ctx):
-    txt = (
-        BOT_NAME + " — Perintah utama (Bahasa Indonesia)\n"
-        + "!solve <teks> — auto-decode rekursif (base64/hex/base32/base58) + deteksi flag\n"
-        + "!decode <type> <teks> — contoh: !decode base64 SGVsbG8=\n"
-        + "!encode <type> <teks> — base64/hex/url\n"
-        + "!hashid <hash> — tebak hash & (opsional) lookup dCode\n"
-        + "!xorbrute <data> — brute single-byte XOR\n"
-        + "!caesar <shift> <teks> — Caesar cipher\n"
-        + "!vigenere enc|dec <key> <teks>\n"
-        + "!atbash <teks>\n"
-        + "!rot13 <teks>\n"
-        + "!strings — extract printable strings dari file terlampir\n"
-        + "!stego — upload file lalu jalankan (EXIF, LSB, strings, hexdump)\n"
-        + "!fileinfo — informasi file (hash, ukuran)\n"
-        + "!hexdump <hex|base64> — tampilkan hexdump\n"
-        + "!jwt <token> — decode JWT header/payload\n"
-        + "!url <decode|encode> <url>\n"
-        + "!ask <pertanyaan> — tanya AI (OPENAI_API_KEY dibutuhkan)\n"
-        + "!prompt-set <text> — owner-only: set system prompt untuk AI\n"
-        + "!history [limit] — lihat riwayat perintah mu\n"
-    )
-    await safe_send(ctx.channel, txt)
-
-# (All command implementations as in previous full version)
-# For brevity, they are identical to the previously-provided comprehensive handlers:
-# decode, encode, hashid, solve, xorbrute, caesar, vigenere, atbash, rot13,
-# strings, stego, fileinfo, hexdump, jwt, url, history, ask, prompt-set.
-# Paste the same handler implementations from the earlier "800+ lines" file here if needed.
-
-# ---------------- Keep-alive & debug endpoints ----------------
-@app.route("/")
-def home():
-    return BOT_NAME + " aktif"
-
-@app.route("/kaithhealthcheck")
-def kaith_health():
-    return "OK", 200
-
-@app.route("/_status")
-def status():
-    try:
-        cur.execute("SELECT COUNT(*) FROM history")
-        total = cur.fetchone()[0]
-    except Exception:
-        total = 0
-    info = {
-        "bot": BOT_NAME,
-        "db_history_count": total,
-        "time": int(time.time())
-    }
-    return jsonify(info), 200
-
-@app.route("/messages", methods=["GET"])
-def get_messages():
-    try:
-        cur.execute("SELECT id, command, ts FROM history ORDER BY id DESC LIMIT 50")
-        rows = cur.fetchall()
-        out = []
-        for r in rows:
-            out.append({"id": r[0], "command": r[1], "ts": r[2]})
-        return jsonify(out), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-def run_bot_thread():
-    """
-    Start the Discord bot in a daemon thread (so Gunicorn can manage Flask).
-    """
-    if not DISCORD_TOKEN:
-        print("DISCORD_TOKEN tidak ditemukan - bot Discord tidak akan dijalankan.")
-        return
-
-    def _run():
-        try:
-            bot.run(DISCORD_TOKEN)
-        except Exception as e:
-            print("Bot thread exited with error:", str(e))
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    print("Discord bot thread started (daemon).")
-
-# Start bot thread on import so Gunicorn + other WSGI servers will run Flask while bot runs in background.
-# This is intentional for the "Gunicorn + bot thread" pattern.
-run_bot_thread()
-
-# If run directly, allow running Flask dev server (useful for debug)
-if __name__ == "__main__":
-    # Debug-run Flask (not recommended for production)
-    print("Menjalankan Flask dev server (debug mode OFF). Untuk production gunakan Gunicorn.")
-app.run(host="0.0.0.0", port=KEEP_ALIVE_PORT, debug=False, use_reloader=False)
-
-# Semua teks bantuan bot
-HELP_TEXT = (
-    "!hexdump <hex|base64> — tampilkan hexdump\n"
-    "!jwt <token> — decode JWT header/payload\n"
-    "!url <decode|encode> <url>\n"
-    "!ask <pertanyaan> — tanya AI (OPENAI_API_KEY dibutuhkan)\n"
-    "!prompt-set <text> — owner-only: set system prompt untuk AI\n"
-    "!history [limit] — lihat riwayat perintah mu\n"
-)
-    await safe_send(ctx.channel, txt)
+    await safe_send(ctx.channel, HELP_TEXT)
 
 @bot.command(name="decode")
 async def cmd_decode(ctx, dtype: str, *, teks: str):
@@ -1274,7 +663,6 @@ async def cmd_stego(ctx):
         await ctx.send("Tunggu sebentar.")
         return
     try:
-        # cari attachment terakhir dari user pada channel
         target = None
         async for m in ctx.channel.history(limit=60):
             if m.author == ctx.author and m.attachments:
@@ -1364,7 +752,8 @@ async def cmd_jwt(ctx, *, token: str):
         if len(parts) < 2:
             await ctx.send("Token JWT tidak valid.")
             return
-        header = parts[0]; payload = parts[1]
+        header = parts[0]
+        payload = parts[1]
         try:
             hd = base64.urlsafe_b64decode(header + "===" ).decode(errors="ignore")
         except Exception:
@@ -1417,32 +806,50 @@ async def cmd_history(ctx, limit: int = 10):
 # ---------------- AI (OpenAI) ----------------
 @bot.command(name="ask")
 async def cmd_ask(ctx, *, prompt: str):
-    if not OPENAI_KEY:
-        await ctx.send("OPENAI_API_KEY belum dikonfigurasi.")
+    if not OPENAI_KEY or OPENAI_CLIENT is None:
+        await ctx.send("OPENAI_API_KEY belum dikonfigurasi atau OpenAI client tidak tersedia.")
         return
     if not rate_limit_ok(ctx.author.id):
         await ctx.send("Tunggu sebentar.")
         return
     try:
-        import openai
-        openai.api_key = OPENAI_KEY
-    except Exception:
-        await ctx.send("OpenAI SDK tidak terpasang. Tambahkan openai di requirements.")
-        return
-    try:
-        await ctx.trigger_typing()
+        # read system prompt from kv
         cur2 = conn.execute("SELECT v FROM kv WHERE k=?", ("n1nja_system_prompt",))
         row = cur2.fetchone()
         if row:
             sp = row[0]
         else:
             sp = "Anda adalah n1nja, asisten CTF ringkas dan aman. Beri petunjuk decoding/analisis, bukan instruksi berbahaya."
-        def call_openai():
-            return openai.ChatCompletion.create(model="gpt-4o-mini", messages=[{"role":"system","content":sp},{"role":"user","content":prompt}], max_tokens=800, temperature=0.25)
-        resp = await asyncio.to_thread(call_openai)
-        out = resp.choices[0].message.content
-        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "ask", prompt, out[:4000])
-        await safe_send(ctx.channel, out)
+        # typing indicator
+        async with ctx.typing():
+            # call OpenAI in thread to avoid blocking
+            def do_call():
+                try:
+                    resp = OPENAI_CLIENT.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": sp},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=800,
+                        temperature=0.25
+                    )
+                    # new client returns object; extract string safely
+                    text = None
+                    try:
+                        # resp.choices[0].message.content or resp.choices[0].message['content']
+                        text = resp.choices[0].message.content
+                    except Exception:
+                        try:
+                            text = resp.choices[0].text
+                        except Exception:
+                            text = str(resp)
+                    return text
+                except Exception as e:
+                    return "OpenAI call failed: %s" % str(e)
+            out = await asyncio.to_thread(do_call)
+        save_history(ctx.guild.id if ctx.guild else "dm", ctx.author.id, "ask", prompt, (out or "")[:4000])
+        await safe_send(ctx.channel, out or "[kosong]")
     except Exception as e:
         await ctx.send("AI Error: " + str(e))
 
@@ -1451,37 +858,68 @@ async def cmd_prompt_set(ctx, *, prompt: str):
     if OWNER_ID != 0 and ctx.author.id != OWNER_ID:
         await ctx.send("Hanya owner yang dapat mengubah prompt.")
         return
-    conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", ("n1nja_system_prompt", prompt))
-    conn.commit()
-    await ctx.send("System prompt diperbarui.")
+    try:
+        conn.execute("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", ("n1nja_system_prompt", prompt))
+        conn.commit()
+        await ctx.send("System prompt diperbarui.")
+    except Exception as e:
+        await ctx.send("Prompt set error: " + str(e))
 
-# ---------------- Keep-alive Flask (Leapcell healthcheck) ----------------
-app = Flask("")
+# ---------------- Keep-alive & debug endpoints ----------------
 @app.route("/")
 def home():
     return BOT_NAME + " aktif"
 
-# required Leapcell health path
 @app.route("/kaithhealthcheck")
 def kaith_health():
     return "OK", 200
 
-def run_flask():
+@app.route("/_status")
+def status():
     try:
-        port = int(os.getenv("KEEP_ALIVE_PORT", str(KEEP_ALIVE_PORT)))
-        app.run(host="0.0.0.0", port=port)
+        cur.execute("SELECT COUNT(*) FROM history")
+        total = cur.fetchone()[0]
     except Exception:
-        pass
+        total = 0
+    info = {
+        "bot": BOT_NAME,
+        "db_history_count": total,
+        "time": int(time.time())
+    }
+    return jsonify(info), 200
 
-def start_keepalive_thread():
-    t = threading.Thread(target=run_flask)
-    t.daemon = True
-    t.start()
+@app.route("/messages", methods=["GET"])
+def get_messages():
+    try:
+        cur.execute("SELECT id, command, ts FROM history ORDER BY id DESC LIMIT 50")
+        rows = cur.fetchall()
+        out = []
+        for r in rows:
+            out.append({"id": r[0], "command": r[1], "ts": r[2]})
+        return jsonify(out), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# ---------------- Main run ----------------
-if __name__ == "__main__":
+# ---------------- Threaded bot runner for Gunicorn ----------------
+def run_bot_thread():
     if not DISCORD_TOKEN:
-        print("DISCORD_TOKEN tidak ditemukan. Set environment variable DISCORD_TOKEN.")
-        raise SystemExit(1)
-    start_keepalive_thread()
-    bot.run(DISCORD_TOKEN)
+        print("DISCORD_TOKEN tidak ditemukan - bot Discord tidak akan dijalankan.")
+        return
+
+    def _run():
+        try:
+            bot.run(DISCORD_TOKEN)
+        except Exception as e:
+            # show compact message without leaking token
+            print("Bot thread exited with error: %s" % str(e))
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    print("Discord bot thread started (daemon).")
+
+# Start bot thread on import (so Gunicorn worker will spawn Flask and bot runs in background)
+run_bot_thread()
+
+# ---------------- Main (dev server) ----------------
+if __name__ == "__main__":
+    print("Menjalankan Flask dev server (debug mode OFF). Untuk production gunakan Gunicorn.")
+    app.run(host="0.0.0.0", port=KEEP_ALIVE_PORT, debug=False, use_reloader=False)
