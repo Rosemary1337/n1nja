@@ -1,46 +1,48 @@
+
+
 # n1nja — CTF & Cybersecurity Helper Bot 🤖
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**n1nja** adalah bot Discord untuk membantu *Capture The Flag (CTF)*, *bug bounty*, dan *cybersecurity challenge*.  
-Bot ini memiliki banyak fitur bawaan untuk decoding, hashing, stego, dan bahkan integrasi AI.
+**n1nja** is a Discord bot to help with *Capture The Flag (CTF)*, *bug bounty*, and *cybersecurity challenges*.  
+This bot has many built-in features for decoding, hashing, stego, and even AI integration.
 
 ---
 
-## ✨ Fitur
+## ✨ Features
 
 - **Encoding / Decoding**
   - Base64, Hex, Base32, ROT13, Atbash
   - XOR brute force (single-byte)
   - Caesar & Vigenère cipher
-  - Auto-decode rekursif (base64 → hex → base32 → base58)
+  - Recursive auto-decode (base64 → hex → base32 → base58)
 
 - **Hash Tools**
-  - `!hashid` → identifikasi hash via [hashes.com](https://hashes.com) + fallback lokal `hashid`
-  - `!fileinfo` → info file + hash MD5/SHA1/SHA256
+  - `!hashid` → identify hash via [hashes.com](https://hashes.com) + local fallback `hashid`
+  - `!fileinfo` → file info + MD5/SHA1/SHA256 hash
 
-- **Steganografi**
-  - Ekstrak EXIF metadata
+- **Steganography**
+  - Extract EXIF metadata
   - LSB extractor
   - Strings & hexdump
 
 - **Utility**
-  - `!strings` → ekstrak string dari file
-  - `!hexdump` → tampilkan data hex/ascii
+  - `!strings` → extract strings from file
+  - `!hexdump` → display hex/ascii data
   - `!jwt` → decode JWT header & payload
   - `!url` → encode/decode URL
-  - `!history` → riwayat command per user
+  - `!history` → command history per user
 
-- **AI (opsional)**
-  - `!ask` → gunakan OpenAI GPT (butuh `OPENAI_API_KEY`)
+- **AI (optional)**
+  - `!ask` → use OpenAI GPT (requires `OPENAI_API_KEY`)
 
 - **Web server (Flask)**
-  - Endpoint `/`, `/status`, `/messages` untuk healthcheck & integrasi eksternal
+  - Endpoint `/`, `/status`, `/messages` for healthcheck & external integration
 
 ---
 
-## 📦 Instalasi
+## 📦 Installation
 
 ### 1. Clone repo
 ```bash
@@ -48,7 +50,7 @@ git clone https://github.com/Rosemary1337/n1nja.git
 cd n1nja
 ````
 
-### 2. Buat virtualenv & install dependencies
+### 2. Create virtualenv & install dependencies
 
 ```bash
 python3.11 -m venv venv
@@ -57,9 +59,9 @@ pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 ```
 
-### 3. Konfigurasi environment
+### 3. Configure environment
 
-Buat file `.env`:
+Create `.env` file:
 
 ```env
 DISCORD_TOKEN=your_discord_bot_token_here
@@ -71,7 +73,7 @@ PASTE_EXPIRY=1d
 DB_FILE=/tmp/n1nja.db
 ```
 
-### 4. Jalankan
+### 4. Run
 
 ```bash
 python main.py
@@ -81,33 +83,33 @@ python main.py
 
 ## 🔑 Command List
 
-Ketik `!ctfhelp` di Discord untuk melihat semua command.
+Type `!ctfhelp` in Discord to see all commands.
 
-Contoh:
+Example:
 
 ```text
 !decode base64 SGVsbG8=
 !hashid e10adc3949ba59abbe56e057f20f883e
 !decode crack e10adc3949ba59abbe56e057f20f883e
 !xorbrute 7b2020207d
-!stego (upload image lalu jalankan)
+!stego (upload image then run)
 ```
 
 ---
 
 ## 🛠️ Requirements
 
-Lihat [requirements.txt](requirements.txt)
+See [requirements.txt](requirements.txt)
 
 * Python **3.11+**
 * Discord bot token
-* (opsional) OpenAI API key untuk `!ask`
+* (optional) OpenAI API key for `!ask`
 
 ---
 
-## 🐳 Docker (opsional)
+## 🐳 Docker (optional)
 
-Build & run dengan Docker:
+Build & run with Docker:
 
 ```bash
 docker build -t n1nja .
@@ -116,17 +118,15 @@ docker run -d --env-file .env n1nja
 
 ---
 
-## ⚠️ Catatan
+## ⚠️ Notes
 
-* Gunakan hanya untuk **legal CTF / edukasi** ⚡
-* AI (`!ask`) butuh `OPENAI_API_KEY`
+* Use only for **legal CTF / education** ⚡
+* AI (`!ask`) requires `OPENAI_API_KEY`
 
 ---
 
-## 📜 Lisensi
+## 📜 License
 
 MIT © 2025 [Rosemary1337](https://github.com/Rosemary1337)
 
 ---
-
-
